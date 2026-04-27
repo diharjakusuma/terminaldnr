@@ -6,7 +6,7 @@ import react from '@vitejs/plugin-react'
 // maka base = '/fx-terminal/'
 export default defineConfig({
   plugins: [react()],
-  base: '/dnranalize/',   // ← GANTI sesuai nama repo kamu
+  base: '/terminaldnr/',   // ← GANTI sesuai nama repo kamu
   build: {
     outDir: 'dist',
     sourcemap: false,
