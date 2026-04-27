@@ -820,6 +820,7 @@ export default function App() {
   const [wsUrl, setWsUrl]         = useState("ws://localhost:8765");
   const [wsStatus, setWsStatus]   = useState("disconnected");
   const [demoMode, setDemoMode]   = useState(true);
+  const [bridgeMode, setBridgeMode] = useState("python"); // "python" | "ea"
   const [ticks, setTicks]         = useState({});
   const [candles, setCandles]     = useState({});
   const [positions, setPositions] = useState([]);
@@ -1059,10 +1060,21 @@ export default function App() {
       const cfg  = getDefaultSLTP(symbol);
       const dig  = DIGITS[symbol] || 5;
 
-      // Apply SL multiplier to AI suggestion, then add buffer
+      // ── Minimum SL per instrument (AI sering kasih nilai terlalu kecil) ──
+      const MIN_SL = {
+        XAUUSD:150, XAGUSD:100,                    // metals — highly volatile
+        BTCUSD:500, ETHUSD:200,                    // crypto — extreme moves
+        USOIL:80,   UKOIL:80,                      // energy — spike prone
+        USTEC:120,  US30:150,  US500:100,          // indices
+        GBPJPY:80,  GBPAUD:70, GBPNZD:70,         // volatile crosses
+        EURJPY:60,  GBPCAD:65, GBPCHF:55,
+      };
+      const minSL = MIN_SL[symbol] || 25; // default FX major: 25p minimum
+
       const aiSLBase = result.sl_pips > 0 ? Math.round(result.sl_pips * slMult) : 0;
       const slInfo   = calcFinalSL(symbol, aiSLBase);
-      const finalSL  = slInfo.total;
+      // Enforce minimum: never go below minSL even after buffer
+      const finalSL  = Math.max(slInfo.total, minSL);
 
       // TP: AI value × mult, OR default × mult — tapi minimal 1.0× finalSL (R:R ≥ 1:1)
       const rawTP   = result.tp_pips > 0 ? result.tp_pips : cfg.tp;
@@ -1092,8 +1104,9 @@ export default function App() {
         return;
       }
 
+      const enforced = finalSL > slInfo.total;
       addAutoLog(symbol,"SL/TP",
-        `SL=${slInfo.base}p×${slMult}+buf${slInfo.buf}p=${finalSL}p→${slPrice} | TP=${finalTP}p→${tpPrice} | R:R 1:${rr}`,null);
+        `SL=${slInfo.base}p×${slMult}+buf${slInfo.buf}p=${slInfo.total}p${enforced?`→min${finalSL}p⚡`:""} | TP=${finalTP}p→${tpPrice} | R:R 1:${rr}`,null);
 
       wsRef.current.send(JSON.stringify({
         type:"send_order", symbol, action:result.signal,
@@ -1111,7 +1124,7 @@ export default function App() {
   const handleAutoToggle = () => {
     const next=!autoEnabled;
     setAutoEnabled(next);
-    if (next) addAutoLog("SYS","START",`Auto engine online — ${autoPairs.length} pairs | H1 trigger | Direct entry`,true);
+    if (next) addAutoLog("SYS","START",`Auto engine online — ${autoPairs.length} pairs | trigger ${autoTF} | Direct entry`,true);
     else addAutoLog("SYS","STOP","Auto engine halted",null);
   };
   const toggleAutoPair = (sym) => {
@@ -1205,20 +1218,43 @@ export default function App() {
 
           <div style={{display:"flex",alignItems:"center",gap:6}}>
             <span style={{
-              width:6,height:6,borderRadius:"50%",background:demoMode?"#ffb300":"#00ff41",
+              width:6,height:6,borderRadius:"50%",
+              background:demoMode?"#ffb300":bridgeMode==="ea"?"#bb55ff":"#00ff41",
               display:"inline-block",
-              boxShadow:demoMode?"0 0 6px #ffb300":"0 0 8px #00ff41",
+              boxShadow:demoMode?"0 0 6px #ffb300":bridgeMode==="ea"?"0 0 8px #bb55ff":"0 0 8px #00ff41",
               animation:"scanPulse 2s infinite",
               flexShrink:0,
             }}/>
-            <span style={{color:demoMode?"#ffb300":"#00ff41",fontSize:9,letterSpacing:2}}>
-              {demoMode?"DEMO MODE":"LIVE MT5"}
+            <span style={{color:demoMode?"#ffb300":bridgeMode==="ea"?"#bb55ff":"#00ff41",fontSize:9,letterSpacing:2}}>
+              {demoMode?"DEMO MODE":bridgeMode==="ea"?"LIVE EA":"LIVE CMD"}
             </span>
           </div>
         </div>
 
         {/* ── Connection block ── */}
-        <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
+          {/* Bridge mode toggle */}
+          {[
+            {id:"python", label:"CMD",  port:"ws://localhost:8765", color:"#00e8ff"},
+            {id:"ea",     label:"EA",   port:"ws://localhost:8766", color:"#bb55ff"},
+          ].map(({id,label,port,color})=>(
+            <button key={id} onClick={()=>{
+              if (wsStatus==="connected") return;
+              setBridgeMode(id);
+              setWsUrl(port);
+            }} style={{
+              padding:"3px 8px",borderRadius:2,
+              border:`1px solid ${bridgeMode===id?color:"#0c2618"}`,
+              background:bridgeMode===id?`${color}15`:"transparent",
+              color:bridgeMode===id?color:"#1a4030",
+              fontFamily:"monospace",fontSize:8,fontWeight:700,letterSpacing:1,
+              cursor:wsStatus==="connected"?"not-allowed":"pointer",
+              boxShadow:bridgeMode===id?`0 0 6px ${color}33`:"none",
+              transition:"all 0.1s",
+              opacity:wsStatus==="connected"&&bridgeMode!==id?0.3:1,
+            }}>{label}</button>
+          ))}
+
           <input
             value={wsUrl} onChange={e=>setWsUrl(e.target.value)}
             style={{
@@ -1500,11 +1536,11 @@ export default function App() {
                   </p>
                   <div style={{display:"flex",gap:14,fontSize:8,fontFamily:"monospace",flexWrap:"wrap",borderTop:"1px solid #0c2618",paddingTop:8}}>
                     {[
-                      ["TREND",    analyses[selected].trend,             "#2a5038"],
-                      ["SUPPORT",  analyses[selected].support,           "#00ff41"],
-                      ["RESIST",   analyses[selected].resistance,        "#ff1f4b"],
-                      ["SL",       `${analyses[selected].sl_pips}p`,     "#ff7700"],
-                      ["TP",       `${analyses[selected].tp_pips}p`,     "#bb55ff"],
+                      ["TREND",   analyses[selected].trend,       "#2a5038"],
+                      ["SUPPORT", analyses[selected].support,     "#00ff41"],
+                      ["RESIST",  analyses[selected].resistance,  "#ff1f4b"],
+                      ["SL",      `${analyses[selected].sl_pips}p`, "#ff7700"],
+                      ["TP",      `${analyses[selected].tp_pips}p`, "#bb55ff"],
                     ].map(([k,v,c])=>(
                       <span key={k} style={{letterSpacing:1}}>
                         <span style={{color:"#122a1c"}}>{k} </span>
