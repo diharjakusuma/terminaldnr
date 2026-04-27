@@ -1,336 +1,346 @@
 """
-MT5 WebSocket Bridge - Multi Pair Forex
-========================================
-Jalankan script ini di PC Windows yang sudah install MT5.
+DnR Bridge — Python CMD WebSocket Bridge for MT5
+Port: 8765  (EA bridge: 8766)
 
-Requirements:
+INSTALL:
     pip install MetaTrader5 websockets asyncio
 
-Cara pakai:
-    1. Buka MT5 terminal dan login ke akun
-    2. Jalankan: python mt5_bridge.py
-    3. Buka web dashboard di browser
-    4. Klik "Connect" dan masukkan: ws://localhost:8765
+RUN:
+    python dnr_bridge.py
+
+Connect DnR Terminal to: ws://localhost:8765
 """
 
 import asyncio
 import json
-import websockets
-import MetaTrader5 as mt5
-from datetime import datetime
 import logging
+import sys
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-logger = logging.getLogger(__name__)
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    print("❌ MetaTrader5 not installed. Run: pip install MetaTrader5")
+    sys.exit(1)
 
-# ============================================================
-# KONFIGURASI
-# ============================================================
-HOST = "localhost"
-PORT = 8765
+try:
+    import websockets
+except ImportError:
+    print("❌ websockets not installed. Run: pip install websockets")
+    sys.exit(1)
 
-PAIRS = [
+# ── Config ────────────────────────────────────────────────────────────
+PORT         = 8765
+TICK_INTERVAL = 1.0   # seconds between tick pushes
+LOG_LEVEL    = logging.INFO
+
+SYMBOLS = [
     "EURUSD","GBPUSD","USDJPY","AUDUSD","USDCHF","USDCAD","NZDUSD",
     "EURGBP","EURJPY","EURCAD","EURAUD","EURNZD","EURCHF",
     "GBPJPY","GBPAUD","GBPCAD","GBPCHF","GBPNZD",
     "AUDJPY","AUDCAD","AUDCHF","AUDNZD","CADJPY","CHFJPY","NZDJPY",
-    "XAUUSD","XAGUSD","USOIL","UKOIL",
-    "USTEC","US30","US500",
+    "XAUUSD","XAGUSD","USOIL","UKOIL","USTEC","US30","US500",
     "BTCUSD","ETHUSD",
 ]
 
-TIMEFRAME_MAP = {
-    "M1":  mt5.TIMEFRAME_M1,
-    "M5":  mt5.TIMEFRAME_M5,
-    "M15": mt5.TIMEFRAME_M15,
-    "H1":  mt5.TIMEFRAME_H1,
-    "H4":  mt5.TIMEFRAME_H4,
-    "D1":  mt5.TIMEFRAME_D1,
+TF_MAP = {
+    "M1":  mt5.TIMEFRAME_M1,  "M5":  mt5.TIMEFRAME_M5,
+    "M15": mt5.TIMEFRAME_M15, "M30": mt5.TIMEFRAME_M30,
+    "H1":  mt5.TIMEFRAME_H1,  "H4":  mt5.TIMEFRAME_H4,
+    "D1":  mt5.TIMEFRAME_D1,  "W1":  mt5.TIMEFRAME_W1,
 }
 
-connected_clients = set()
+# ── Logging ───────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("DnR-Bridge")
 
-# ============================================================
-# MT5 FUNCTIONS
-# ============================================================
+# ── MT5 Connection ────────────────────────────────────────────────────
 def init_mt5():
     if not mt5.initialize():
-        logger.error(f"MT5 initialize failed: {mt5.last_error()}")
+        log.error(f"MT5 initialize failed: {mt5.last_error()}")
         return False
-    info = mt5.terminal_info()
-    logger.info(f"MT5 Connected: {info.name} | Build {info.build}")
+    info = mt5.account_info()
+    if info is None:
+        log.error("No MT5 account — open MetaTrader 5 first")
+        return False
+    log.info(f"✅ MT5 connected — {info.name} | {info.server} | Balance: {info.balance}")
     return True
 
-
-def get_tick(symbol):
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        return None
-    info = mt5.symbol_info(symbol)
-    return {
-        "symbol": symbol,
-        "bid": round(tick.bid, info.digits),
-        "ask": round(tick.ask, info.digits),
-        "spread": round((tick.ask - tick.bid) / mt5.symbol_info(symbol).point, 1),
-        "time": datetime.fromtimestamp(tick.time).isoformat(),
-        "digits": info.digits,
-    }
-
-
-def get_candles(symbol, timeframe_str="M5", count=100):
-    tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_M5)
-    rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
-    if rates is None:
-        return []
-    candles = []
-    for r in rates:
-        candles.append({
-            "time": datetime.fromtimestamp(r['time']).isoformat(),
-            "open":  round(float(r['open']), 5),
-            "high":  round(float(r['high']), 5),
-            "low":   round(float(r['low']), 5),
-            "close": round(float(r['close']), 5),
-            "volume": int(r['tick_volume']),
-        })
-    return candles
-
-
 def get_account_info():
-    acc = mt5.account_info()
-    if acc is None:
+    info = mt5.account_info()
+    if info is None:
         return {}
     return {
-        "balance":  round(acc.balance, 2),
-        "equity":   round(acc.equity, 2),
-        "margin":   round(acc.margin, 2),
-        "free_margin": round(acc.margin_free, 2),
-        "profit":   round(acc.profit, 2),
-        "leverage": acc.leverage,
-        "currency": acc.currency,
-        "server":   acc.server,
-        "name":     acc.name,
+        "balance":     round(info.balance, 2),
+        "equity":      round(info.equity, 2),
+        "margin":      round(info.margin, 2),
+        "free_margin": round(info.margin_free, 2),
+        "profit":      round(info.profit, 2),
+        "leverage":    info.leverage,
+        "currency":    info.currency,
+        "name":        info.name,
+        "server":      info.server,
     }
 
-
-def get_open_positions():
+def get_positions():
     positions = mt5.positions_get()
     if positions is None:
         return []
     result = []
     for p in positions:
+        sym   = p.symbol
+        digs  = mt5.symbol_info(sym).digits if mt5.symbol_info(sym) else 5
         result.append({
-            "ticket":  p.ticket,
-            "symbol":  p.symbol,
-            "type":    "BUY" if p.type == 0 else "SELL",
-            "volume":  p.volume,
-            "price_open": round(p.price_open, 5),
-            "price_current": round(p.price_current, 5),
-            "sl": round(p.sl, 5),
-            "tp": round(p.tp, 5),
-            "profit": round(p.profit, 2),
-            "swap":   round(p.swap, 2),
-            "time":   datetime.fromtimestamp(p.time).isoformat(),
-            "comment": p.comment,
+            "ticket":        p.ticket,
+            "symbol":        sym,
+            "type":          "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+            "volume":        p.volume,
+            "price_open":    round(p.price_open,    digs),
+            "price_current": round(p.price_current, digs),
+            "sl":            round(p.sl, digs),
+            "tp":            round(p.tp, digs),
+            "profit":        round(p.profit, 2),
+            "magic":         p.magic,
+            "comment":       p.comment,
         })
     return result
 
+def get_ticks():
+    data = {}
+    for sym in SYMBOLS:
+        info = mt5.symbol_info(sym)
+        if info is None or not info.visible:
+            continue
+        tick = mt5.symbol_info_tick(sym)
+        if tick is None:
+            continue
+        digs = info.digits
+        pt   = info.point
+        spr  = round((tick.ask - tick.bid) / pt / 10, 1) if pt > 0 else 0
+        data[sym] = {
+            "bid":    round(tick.bid, digs),
+            "ask":    round(tick.ask, digs),
+            "spread": spr,
+            "digits": digs,
+            "time":   datetime.fromtimestamp(tick.time).isoformat(),
+        }
+    return data
 
-def send_order(symbol, action, volume, sl=0.0, tp=0.0, comment="WebDash"):
+def get_candles(symbol, timeframe_str, count=100):
+    tf = TF_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
+    rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+    if rates is None:
+        return []
+    info = mt5.symbol_info(symbol)
+    digs = info.digits if info else 5
+    result = []
+    for r in rates:
+        result.append({
+            "time":   datetime.fromtimestamp(r["time"]).isoformat(),
+            "open":   round(float(r["open"]),  digs),
+            "high":   round(float(r["high"]),  digs),
+            "low":    round(float(r["low"]),   digs),
+            "close":  round(float(r["close"]), digs),
+            "volume": int(r["tick_volume"]),
+        })
+    return result
+
+def execute_order(symbol, action, volume, sl, tp):
     info = mt5.symbol_info(symbol)
     if info is None:
         return {"success": False, "error": f"Symbol {symbol} not found"}
 
-    tick = mt5.symbol_info_tick(symbol)
+    digs  = info.digits
+    tick  = mt5.symbol_info_tick(symbol)
     price = tick.ask if action == "BUY" else tick.bid
-    order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
+    otype = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
 
     request = {
-        "action":      mt5.TRADE_ACTION_DEAL,
-        "symbol":      symbol,
-        "volume":      float(volume),
-        "type":        order_type,
-        "price":       price,
-        "sl":          float(sl) if sl else 0.0,
-        "tp":          float(tp) if tp else 0.0,
-        "deviation":   20,
-        "magic":       20250417,
-        "comment":     comment,
-        "type_time":   mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "action":                mt5.TRADE_ACTION_DEAL,
+        "symbol":                symbol,
+        "volume":                float(volume),
+        "type":                  otype,
+        "price":                 round(price, digs),
+        "sl":                    round(float(sl), digs) if sl else 0.0,
+        "tp":                    round(float(tp), digs) if tp else 0.0,
+        "deviation":             30,
+        "magic":                 20260101,
+        "comment":               "DnR Bridge",
+        "type_time":             mt5.ORDER_TIME_GTC,
+        "type_filling":          mt5.ORDER_FILLING_IOC,
     }
 
     result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        return {"success": False, "error": f"Order failed: {result.comment} (code {result.retcode})"}
-    return {"success": True, "ticket": result.order, "price": result.price}
+    if result is None:
+        err = mt5.last_error()
+        return {"success": False, "error": f"order_send failed: {err}"}
 
+    if result.retcode == mt5.TRADE_RETCODE_DONE:
+        return {
+            "success": True,
+            "ticket":  result.order,
+            "price":   round(result.price, digs),
+            "action":  action,
+            "symbol":  symbol,
+        }
+    else:
+        return {
+            "success": False,
+            "error":   f"Order ditolak: {result.comment} (retcode {result.retcode})",
+            "retcode": result.retcode,
+        }
 
 def close_position(ticket):
     pos = mt5.positions_get(ticket=ticket)
     if not pos:
-        return {"success": False, "error": "Position not found"}
-    p = pos[0]
-    tick = mt5.symbol_info_tick(p.symbol)
-    close_price = tick.bid if p.type == 0 else tick.ask
-    close_type = mt5.ORDER_TYPE_SELL if p.type == 0 else mt5.ORDER_TYPE_BUY
+        return {"success": False, "ticket": ticket, "error": "Position not found"}
+
+    p     = pos[0]
+    sym   = p.symbol
+    digs  = mt5.symbol_info(sym).digits if mt5.symbol_info(sym) else 5
+    tick  = mt5.symbol_info_tick(sym)
+    price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+    otype = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
 
     request = {
-        "action":      mt5.TRADE_ACTION_DEAL,
-        "symbol":      p.symbol,
-        "volume":      p.volume,
-        "type":        close_type,
-        "position":    ticket,
-        "price":       close_price,
-        "deviation":   20,
-        "magic":       20250417,
-        "comment":     "Close by WebDash",
-        "type_time":   mt5.ORDER_TIME_GTC,
+        "action":       mt5.TRADE_ACTION_DEAL,
+        "symbol":       sym,
+        "volume":       p.volume,
+        "type":         otype,
+        "position":     ticket,
+        "price":        round(price, digs),
+        "deviation":    30,
+        "magic":        20260101,
+        "comment":      "DnR Close",
+        "type_time":    mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
+
     result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        return {"success": False, "error": result.comment}
-    return {"success": True}
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        return {"success": True, "ticket": ticket}
+    else:
+        err = result.comment if result else str(mt5.last_error())
+        return {"success": False, "ticket": ticket, "error": err}
 
+# ── WebSocket Handler ─────────────────────────────────────────────────
+connected_clients = set()
 
-# ============================================================
-# WEBSOCKET SERVER
-# ============================================================
-async def broadcast(message):
-    if connected_clients:
-        data = json.dumps(message)
-        await asyncio.gather(*[c.send(data) for c in connected_clients], return_exceptions=True)
-
-
-async def tick_streamer():
-    """Stream live ticks for all pairs every 500ms"""
-    while True:
-        try:
-            ticks = {}
-            for pair in PAIRS:
-                t = get_tick(pair)
-                if t:
-                    ticks[pair] = t
-            if ticks and connected_clients:
-                await broadcast({"type": "ticks", "data": ticks})
-        except Exception as e:
-            logger.error(f"Tick error: {e}")
-        await asyncio.sleep(0.5)
-
-
-async def position_streamer():
-    """Stream open positions every 2s"""
-    while True:
-        try:
-            if connected_clients:
-                positions = get_open_positions()
-                account = get_account_info()
-                await broadcast({
-                    "type": "account",
-                    "positions": positions,
-                    "account": account
-                })
-        except Exception as e:
-            logger.error(f"Position error: {e}")
-        await asyncio.sleep(2)
-
-
-async def handle_client(websocket):
+async def handler(websocket):
+    addr = websocket.remote_address
+    log.info(f"Client connected: {addr}")
     connected_clients.add(websocket)
-    client_ip = websocket.remote_address[0]
-    logger.info(f"Client connected: {client_ip} | Total: {len(connected_clients)}")
 
     try:
-        # Send initial data on connect
+        # Send initial account + positions
         await websocket.send(json.dumps({
-            "type": "init",
-            "pairs": PAIRS,
-            "account": get_account_info(),
-            "positions": get_open_positions(),
+            "type":      "account",
+            "account":   get_account_info(),
+            "positions": get_positions(),
         }))
 
-        async for message in websocket:
+        async for raw in websocket:
             try:
-                req = json.loads(message)
-                msg_type = req.get("type")
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
 
-                if msg_type == "get_candles":
-                    symbol = req.get("symbol", "EURUSD")
-                    tf     = req.get("timeframe", "M5")
-                    count  = req.get("count", 100)
-                    candles = get_candles(symbol, tf, count)
-                    await websocket.send(json.dumps({
-                        "type": "candles",
-                        "symbol": symbol,
-                        "timeframe": tf,
-                        "data": candles
-                    }))
+            mtype = msg.get("type", "")
 
-                elif msg_type == "send_order":
-                    result = send_order(
-                        req["symbol"], req["action"],
-                        req["volume"],
-                        req.get("sl", 0), req.get("tp", 0)
-                    )
-                    await websocket.send(json.dumps({
-                        "type": "order_result",
-                        "symbol": req.get("symbol"),
-                        "action": req.get("action"),
-                        "reqId": req.get("reqId",""),
-                        **result
-                    }))
+            if mtype == "get_candles":
+                sym   = msg.get("symbol", "EURUSD")
+                tf    = msg.get("timeframe", "H1")
+                count = int(msg.get("count", 100))
+                candles = get_candles(sym, tf, count)
+                await websocket.send(json.dumps({
+                    "type":   "candles",
+                    "symbol": sym,
+                    "data":   candles,
+                }))
 
-                elif msg_type == "close_position":
-                    result = close_position(req["ticket"])
-                    await websocket.send(json.dumps({
-                        "type": "close_result",
-                        "ticket": req.get("ticket"),
-                        **result
-                    }))
+            elif mtype == "get_positions":
+                await websocket.send(json.dumps({
+                    "type":      "account",
+                    "account":   get_account_info(),
+                    "positions": get_positions(),
+                }))
 
-                elif msg_type == "get_positions":
-                    positions = get_open_positions()
-                    account = get_account_info()
+            elif mtype == "send_order":
+                r = execute_order(
+                    msg.get("symbol"), msg.get("action"),
+                    msg.get("volume", 0.01),
+                    msg.get("sl", 0), msg.get("tp", 0),
+                )
+                await websocket.send(json.dumps({"type": "order_result", **r}))
+                if r.get("success"):
                     await websocket.send(json.dumps({
                         "type": "account",
-                        "positions": positions,
-                        "account": account,
+                        "account": get_account_info(),
+                        "positions": get_positions(),
                     }))
 
-                elif msg_type == "ping":
-                    await websocket.send(json.dumps({"type": "pong"}))
+            elif mtype == "close_position":
+                r = close_position(int(msg.get("ticket", 0)))
+                await websocket.send(json.dumps({"type": "close_result", **r}))
+                if r.get("success"):
+                    await websocket.send(json.dumps({
+                        "type": "account",
+                        "account": get_account_info(),
+                        "positions": get_positions(),
+                    }))
 
-            except json.JSONDecodeError:
-                logger.warning("Invalid JSON from client")
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-                await websocket.send(json.dumps({"type": "error", "message": str(e)}))
+            elif mtype == "ping":
+                await websocket.send(json.dumps({"type": "pong"}))
 
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         connected_clients.discard(websocket)
-        logger.info(f"Client disconnected: {client_ip} | Total: {len(connected_clients)}")
+        log.info(f"Client disconnected: {addr}")
 
+# ── Tick broadcast loop ───────────────────────────────────────────────
+async def tick_loop():
+    while True:
+        await asyncio.sleep(TICK_INTERVAL)
+        if not connected_clients:
+            continue
+        try:
+            data = get_ticks()
+            if not data:
+                continue
+            payload = json.dumps({"type": "ticks", "data": data})
+            dead = set()
+            for ws in connected_clients.copy():
+                try:
+                    await ws.send(payload)
+                except Exception:
+                    dead.add(ws)
+            connected_clients -= dead
+        except Exception as e:
+            log.warning(f"Tick loop error: {e}")
 
+# ── Main ──────────────────────────────────────────────────────────────
 async def main():
     if not init_mt5():
-        logger.error("Cannot start — MT5 not connected!")
-        return
+        sys.exit(1)
 
-    logger.info(f"Starting WebSocket server on ws://{HOST}:{PORT}")
-    logger.info(f"Monitoring pairs: {', '.join(PAIRS)}")
-
-    async with websockets.serve(handle_client, HOST, PORT):
-        await asyncio.gather(
-            tick_streamer(),
-            position_streamer(),
-        )
-
+    async with websockets.serve(handler, "localhost", PORT):
+        log.info(f"✅ DnR Python Bridge running on ws://localhost:{PORT}")
+        log.info("   Connect DnR Terminal → CMD mode → ws://localhost:8765")
+        log.info("   Press Ctrl+C to stop")
+        tick_task = asyncio.create_task(tick_loop())
+        try:
+            await asyncio.Future()  # run forever
+        except asyncio.CancelledError:
+            tick_task.cancel()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bridge stopped.")
+        log.info("Bridge stopped.")
         mt5.shutdown()
